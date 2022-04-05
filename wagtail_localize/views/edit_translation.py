@@ -27,6 +27,7 @@ from rest_framework.decorators import (
 )
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from wagtail import VERSION as WAGTAIL_VERSION
 from wagtail.admin import messages
 from wagtail.admin.edit_handlers import (
     BaseCompositeEditHandler,
@@ -59,6 +60,7 @@ from wagtail_localize.models import (
     StringSegment,
     StringTranslation,
     Translation,
+    TranslationSource,
 )
 from wagtail_localize.segments import StringSegmentValue
 
@@ -267,15 +269,47 @@ def get_segment_location_info(
             if issubclass(field.related_model, Page):
                 edit_handler = tab_helper.get_field_edit_handler(field.name)
 
+                if WAGTAIL_VERSION >= (2, 17):
+                    # @see https://github.com/wagtail/wagtail/pull/7684
+                    # the target_models is set in the ModelFieldRegistry for ForeignKeys
+
+                    # Check for explicit `page_types` kwarg in PageChooserPanel
+                    if field.name in edit_handler.widget_overrides() and hasattr(
+                        edit_handler.widget_overrides()[field.name], "target_models"
+                    ):
+                        allowed_page_types = [
+                            "{app}.{model}".format(
+                                app=model._meta.app_label,
+                                model=model._meta.model_name,
+                            )
+                            for model in edit_handler.widget_overrides()[
+                                field.name
+                            ].target_models
+                        ]
+                    else:
+                        from wagtail.admin.forms.models import registry
+
+                        allowed_page_types = [
+                            "{app}.{model}".format(
+                                app=model._meta.app_label,
+                                model=model._meta.model_name,
+                            )
+                            for model in registry.foreign_key_lookup(field)[
+                                "widget"
+                            ].target_models
+                        ]
+                else:
+                    allowed_page_types = [
+                        "{app}.{model}".format(
+                            app=model._meta.app_label, model=model._meta.model_name
+                        )
+                        for model in edit_handler.target_models()
+                    ]
+
                 if isinstance(edit_handler, PageChooserPanel):
                     return {
                         "type": "page_chooser",
-                        "allowed_page_types": [
-                            "{app}.{model}".format(
-                                app=model._meta.app_label, model=model._meta.model_name
-                            )
-                            for model in edit_handler.target_models()
-                        ],
+                        "allowed_page_types": allowed_page_types,
                     }
 
                 else:
@@ -366,7 +400,7 @@ def get_segment_location_info(
                 "type": "text",
             }
         elif (
-            isinstance(block, blocks.StructBlock)
+            isinstance(block, (blocks.StructBlock, blocks.StreamBlock))
             and content_components
             and isinstance(content_components, list)
         ):
@@ -374,6 +408,8 @@ def get_segment_location_info(
             return widget_from_block(
                 block.child_blocks.get(block_field_name), content_components
             )
+        elif isinstance(block, blocks.ListBlock):
+            return widget_from_block(block.child_block, content_components[1:])
 
         return {"type": "unknown"}
 
@@ -381,12 +417,13 @@ def get_segment_location_info(
         block_type_name = field_path_components[1]
         block_type = field.stream_block.child_blocks[block_type_name]
 
-        if isinstance(block_type, blocks.StructBlock):
+        if isinstance(block_type, (blocks.StructBlock, blocks.StreamBlock)):
             block_field_name = field_path_components[2]
             block_field = block_type.child_blocks[block_field_name].label
-
+            content_components = field_path_components[2:]
         else:
             block_field = None
+            content_components = None
 
         return {
             "tab": tab,
@@ -395,13 +432,13 @@ def get_segment_location_info(
             "blockId": content_path_components[1],
             "fieldHelpText": "",
             "subField": block_field,
-            "widget": widget_from_block(block_type, content_path_components[2:])
+            "widget": widget_from_block(block_type, content_components)
             if widget
             else None,
         }
 
     elif (
-        isinstance(field, (models.ManyToOneRel))
+        isinstance(field, models.ManyToOneRel)
         and isinstance(field.remote_field, ParentalKey)
         and issubclass(field.related_model, TranslatableMixin)
     ):
@@ -773,6 +810,25 @@ def edit_translation(request, translation, instance):
             ).format(model_name=capfirst(source_instance._meta.verbose_name)),
         )
 
+    if isinstance(instance, Page):
+        try:
+            # Check that there is a parent page.
+            add_convert_to_alias_url = (
+                Page.objects.filter(
+                    translation_key=instance.translation_key,
+                    locale_id=TranslationSource.objects.get(
+                        object_id=instance.translation_key,
+                        specific_content_type=instance.content_type_id,
+                    ).locale_id,
+                )
+                .exclude(pk=instance.pk)
+                .exists()
+            )
+        except (TranslationSource.DoesNotExist, IndexError):
+            add_convert_to_alias_url = False
+    else:
+        add_convert_to_alias_url = False
+
     return render(
         request,
         "wagtail_localize/admin/edit_translation.html",
@@ -873,6 +929,11 @@ def edit_translation(request, translation, instance):
                         "stopTranslationUrl": reverse(
                             "wagtail_localize:stop_translation", args=[translation.id]
                         ),
+                        "convertToAliasUrl": reverse(
+                            "wagtail_localize:convert_to_alias", args=[instance.id]
+                        )
+                        if add_convert_to_alias_url
+                        else None,
                     },
                     "previewModes": [
                         {

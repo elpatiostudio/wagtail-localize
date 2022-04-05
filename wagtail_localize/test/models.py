@@ -53,17 +53,27 @@ class TestStructBlock(blocks.StructBlock):
     field_b = blocks.TextBlock()
 
 
-class TestNestedStreamBlock(blocks.StreamBlock):
-    block_a = blocks.TextBlock()
-    block_b = blocks.TextBlock()
-
-
 class TestChooserStructBlock(blocks.StructBlock):
     page = blocks.PageChooserBlock()
 
 
+class TestNestedStreamBlock(blocks.StreamBlock):
+    block_a = blocks.TextBlock()
+    block_b = blocks.TextBlock()
+    block_l = blocks.ListBlock(blocks.CharBlock())
+    chooser = blocks.PageChooserBlock()
+    chooser_in_struct = TestChooserStructBlock()
+    chooser_in_list = blocks.ListBlock(blocks.PageChooserBlock())
+
+
 class TestNestedChooserStructBlock(blocks.StructBlock):
     nested_page = TestChooserStructBlock()
+
+
+class TestStreamBlockInStructBlock(blocks.StructBlock):
+    nested_stream = blocks.StreamBlock(
+        [("page", blocks.PageChooserBlock()), ("checklist", TestChooserStructBlock())]
+    )
 
 
 class CustomStructBlock(blocks.StructBlock):
@@ -96,6 +106,11 @@ class CustomBlockWithoutExtractMethod(blocks.Block):
         default = None
 
 
+class ListStructBlock(blocks.StructBlock):
+    title = blocks.CharBlock(required=False)
+    items = blocks.ListBlock(blocks.CharBlock)
+
+
 if telepath:
 
     class CustomBlockWithoutExtractMethodAdapter(telepath.Adapter):
@@ -119,7 +134,9 @@ class TestStreamBlock(blocks.StreamBlock):
     test_blockquoteblock = blocks.BlockQuoteBlock()
     test_structblock = TestStructBlock()
     test_listblock = blocks.ListBlock(blocks.TextBlock())
+    test_listblock_in_structblock = ListStructBlock()
     test_nestedstreamblock = TestNestedStreamBlock()
+    test_streamblock_in_structblock = TestStreamBlockInStructBlock()
     test_customstructblock = CustomStructBlock()
     test_customblockwithoutextractmethod = CustomBlockWithoutExtractMethod()
     test_pagechooserblock = blocks.PageChooserBlock()

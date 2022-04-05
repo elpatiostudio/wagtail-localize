@@ -94,10 +94,10 @@ class StreamFieldSegmentExtractor:
             return self.handle_related_object_block(block_value)
 
         elif isinstance(block_type, blocks.StructBlock):
-            return self.handle_struct_block(block_value)
+            return self.handle_struct_block(block_value, raw_value=raw_value)
 
         elif isinstance(block_type, blocks.ListBlock):
-            return self.handle_list_block(block_value, raw_value)
+            return self.handle_list_block(block_value, raw_value=raw_value)
 
         elif isinstance(block_type, blocks.StreamBlock):
             return self.handle_stream_block(block_value)
@@ -121,29 +121,46 @@ class StreamFieldSegmentExtractor:
         else:
             return [OverridableSegmentValue("", related_object.pk)]
 
-    def handle_struct_block(self, struct_block):
+    def handle_struct_block(self, struct_block, raw_value=None):
         segments = []
 
         for field_name, block_value in struct_block.items():
             block_type = struct_block.block.child_blocks[field_name]
+            try:
+                block_raw_value = raw_value["value"].get(field_name)
+            except (KeyError, TypeError):
+                # e.g. raw_value is None, or is that from chooser
+                block_raw_value = None
             segments.extend(
                 segment.wrap(field_name)
-                for segment in self.handle_block(block_type, block_value)
+                for segment in self.handle_block(
+                    block_type, block_value, raw_value=block_raw_value
+                )
             )
 
         return segments
 
-    def handle_list_block(self, list_block, raw_value):
+    def handle_list_block(self, list_block, raw_value=None):
         segments = []
-        if WAGTAIL_VERSION >= (2, 16):
+        if WAGTAIL_VERSION >= (2, 16) and raw_value is not None:
             # Wagtail 2.16 changes ListBlock values to be ListValue objects (i.e. {'value': '', 'id': ''})
             # and will automatically convert from the simple list format used before. However that requires
             # the block to be saved. bound_blocks will return ListValue objects, so we need to check that the
-            # stored value is the new format before extracting segments, othewise the block ids will continue
+            # stored value is the new format before extracting segments, otherwise the block ids will continue
             # to change.
-            has_block_format = list_block.list_block._item_is_in_block_format(
-                raw_value["value"][0]
-            )
+            has_block_format = False
+            if (
+                isinstance(raw_value, dict)
+                and "value" in raw_value
+                and len(raw_value["value"]) > 0
+            ):
+                has_block_format = list_block.list_block._item_is_in_block_format(
+                    raw_value["value"][0]
+                )
+            elif isinstance(raw_value, list) and len(raw_value) > 0:
+                has_block_format = list_block.list_block._item_is_in_block_format(
+                    raw_value[0]
+                )
             if has_block_format:
                 for block in list_block.bound_blocks:
                     segments.extend(
@@ -156,10 +173,13 @@ class StreamFieldSegmentExtractor:
         segments = []
 
         for index, block in enumerate(stream_block):
+            raw_data = (
+                stream_block.raw_data[index] if WAGTAIL_VERSION >= (2, 16) else None
+            )
             segments.extend(
                 segment.wrap(block.id)
                 for segment in self.handle_block(
-                    block.block, block.value, raw_value=stream_block.raw_data[index]
+                    block.block, block.value, raw_value=raw_data
                 )
             )
 
@@ -245,7 +265,7 @@ def extract_segments(instance):
                 elif extract_overridables:
                     segments.append(OverridableSegmentValue(field.name, value))
 
-        elif isinstance(field, (models.ForeignKey)):
+        elif isinstance(field, models.ForeignKey):
             if is_translatable:
                 if not issubclass(field.related_model, TranslatableMixin):
                     raise ImproperlyConfigured(
@@ -276,7 +296,7 @@ def extract_segments(instance):
                         OverridableSegmentValue(field.name, related_instance.pk)
                     )
         elif (
-            isinstance(field, (models.ManyToOneRel))
+            isinstance(field, models.ManyToOneRel)
             and isinstance(field.remote_field, ParentalKey)
             and issubclass(field.related_model, TranslatableMixin)
         ):
