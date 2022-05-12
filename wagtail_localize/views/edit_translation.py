@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import polib
 
+from django.conf import settings
 from django.contrib.admin.utils import quote
 from django.contrib.auth import get_user_model
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -29,13 +30,6 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from wagtail import VERSION as WAGTAIL_VERSION
 from wagtail.admin import messages
-from wagtail.admin.edit_handlers import (
-    BaseCompositeEditHandler,
-    FieldPanel,
-    ObjectList,
-    PageChooserPanel,
-    TabbedInterface,
-)
 from wagtail.admin.navigation import get_explorable_root_page
 from wagtail.admin.templatetags.wagtailadmin_tags import avatar_url
 from wagtail.admin.views.pages.utils import get_valid_next_url_from_request
@@ -50,7 +44,6 @@ from wagtail.images.models import AbstractImage
 from wagtail.snippets.blocks import SnippetChooserBlock
 from wagtail.snippets.models import get_snippet_models
 from wagtail.snippets.permissions import get_permission_name, user_can_edit_snippet_type
-from wagtail.snippets.views.snippets import get_snippet_edit_handler
 
 from wagtail_localize.compat import DATE_FORMAT
 from wagtail_localize.machine_translators import get_machine_translator
@@ -63,6 +56,28 @@ from wagtail_localize.models import (
     TranslationSource,
 )
 from wagtail_localize.segments import StringSegmentValue
+
+
+if WAGTAIL_VERSION >= (4, 0):
+    from wagtail.snippets.views.snippets import (
+        get_snippet_panel as get_snippet_edit_handler,
+    )
+else:
+    from wagtail.snippets.views.snippets import get_snippet_edit_handler
+
+if WAGTAIL_VERSION >= (3, 0):
+    # TODO: tidy this up once we drop support for Wagtail < 3.0
+    from wagtail.admin.panels import FieldPanel, ObjectList, PageChooserPanel
+    from wagtail.admin.panels import PanelGroup as BaseCompositeEditHandler
+    from wagtail.admin.panels import TabbedInterface
+else:
+    from wagtail.admin.edit_handlers import (
+        BaseCompositeEditHandler,
+        FieldPanel,
+        ObjectList,
+        PageChooserPanel,
+        TabbedInterface,
+    )
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -175,13 +190,29 @@ class TabHelper:
 
     @cached_property
     def field_tab_mapping(self):
-        if isinstance(self.edit_handler, TabbedInterface):
+        if WAGTAIL_VERSION >= (3, 0):
+            # ObjectList used to inherit from TabbedInterface pre 3.0. Now they both inherit from PanelGroup
+            # Ideally we would check on PanelGroup, however FieldRowPanel and MultiRowPanel do so too, but we're
+            # only interested in "tabbing"
+            is_tabbed = isinstance(self.edit_handler, (TabbedInterface, ObjectList))
+        else:
+            is_tabbed = isinstance(self.edit_handler, TabbedInterface)
+
+        if is_tabbed:
             field_tabs = {}
             for tab in self.edit_handler.children:
-                for tab_field in tab.required_fields():
+                if WAGTAIL_VERSION >= (3, 0):
+                    form_options = tab.get_form_options()
+                    required_fields = form_options.get("fields", [])
+                    required_formsets = form_options.get("formsets", {}).keys()
+                else:
+                    required_fields = tab.required_fields()
+                    required_formsets = tab.required_formsets().keys()
+
+                for tab_field in required_fields:
                     field_tabs[tab_field] = tab.heading
 
-                for tab_formset in tab.required_formsets().keys():
+                for tab_formset in required_formsets:
                     field_tabs[tab_formset] = tab.heading
 
             return field_tabs
@@ -196,11 +227,26 @@ class TabHelper:
 
     @cached_property
     def field_ordering_mapping(self):
-        if isinstance(self.edit_handler, TabbedInterface):
+        if WAGTAIL_VERSION >= (3, 0):
+            # ObjectList used to inherit from TabbedInterface pre 3.0. Now they both inherit from PanelGroup
+            # Ideally we would check on PanelGroup, however FieldRowPanel and MultiRowPanel do so too, but we're
+            # only interested in "tabbing"
+            is_tabbed = isinstance(self.edit_handler, (TabbedInterface, ObjectList))
+        else:
+            is_tabbed = isinstance(self.edit_handler, TabbedInterface)
+
+        if is_tabbed:
             field_orderings = {}
             order = 0
             for tab in self.edit_handler.children:
-                for tab_field in tab.required_fields():
+                if WAGTAIL_VERSION >= (3, 0):
+                    form_options = tab.get_form_options()
+                    required_fields = form_options.get("fields", [])
+                    required_formsets = form_options.get("formsets", {})
+                else:
+                    required_fields = tab.required_fields()
+                    required_formsets = tab.required_formsets().keys()
+                for tab_field in required_fields:
                     # TODO(someday): Orderings of fields within inline panels.
                     # (currently, they will all be assigned the same order value,
                     # so they will end up being order by how they are defined on
@@ -209,7 +255,7 @@ class TabHelper:
                     field_orderings[tab_field] = order
                     order += 1
 
-                for tab_formset in tab.required_formsets().keys():
+                for tab_formset in required_formsets:
                     field_orderings[tab_formset] = order
                     order += 1
 
@@ -273,18 +319,22 @@ def get_segment_location_info(
                     # @see https://github.com/wagtail/wagtail/pull/7684
                     # the target_models is set in the ModelFieldRegistry for ForeignKeys
 
+                    if WAGTAIL_VERSION >= (3, 0):
+                        widget_overrides = edit_handler.get_form_options().get(
+                            "widgets", {}
+                        )
+                    else:
+                        widget_overrides = edit_handler.widget_overrides()
                     # Check for explicit `page_types` kwarg in PageChooserPanel
-                    if field.name in edit_handler.widget_overrides() and hasattr(
-                        edit_handler.widget_overrides()[field.name], "target_models"
+                    if field.name in widget_overrides and hasattr(
+                        widget_overrides[field.name], "target_models"
                     ):
                         allowed_page_types = [
                             "{app}.{model}".format(
                                 app=model._meta.app_label,
                                 model=model._meta.model_name,
                             )
-                            for model in edit_handler.widget_overrides()[
-                                field.name
-                            ].target_models
+                            for model in widget_overrides[field.name].target_models
                         ]
                     else:
                         from wagtail.admin.forms.models import registry
@@ -685,6 +735,55 @@ def edit_translation(request, translation, instance):
             }
         )
 
+    def get_edit_url(instance):
+        if isinstance(instance, Page):
+            return reverse("wagtailadmin_pages:edit", args=[instance.id])
+
+        elif instance._meta.model in get_snippet_models():
+            return reverse(
+                "wagtailsnippets:edit",
+                args=[
+                    instance._meta.app_label,
+                    instance._meta.model_name,
+                    quote(instance.pk),
+                ],
+            )
+
+        elif "wagtail_localize.modeladmin" in settings.INSTALLED_APPS:
+            return reverse(
+                "{app_label}_{model_name}_modeladmin_edit".format(
+                    app_label=instance._meta.app_label,
+                    model_name=instance._meta.model_name,
+                ),
+                args=[quote(instance.pk)],
+            )
+
+    def get_submit_translation_url(instance):
+        if isinstance(instance, Page):
+            return reverse(
+                "wagtail_localize:submit_page_translation", args=[instance.id]
+            )
+
+        elif instance._meta.model in get_snippet_models():
+            return reverse(
+                "wagtail_localize:submit_snippet_translation",
+                args=[
+                    instance._meta.app_label,
+                    instance._meta.model_name,
+                    quote(instance.id),
+                ],
+            )
+
+        elif "wagtail_localize.modeladmin" in settings.INSTALLED_APPS:
+            return reverse(
+                "wagtail_localize_modeladmin:submit_translation",
+                args=[
+                    instance._meta.app_label,
+                    instance._meta.model_name,
+                    quote(instance.id),
+                ],
+            )
+
     def get_source_object_info(segment):
         instance = segment.get_source_instance()
 
@@ -693,32 +792,15 @@ def edit_translation(request, translation, instance):
                 "title": str(instance),
                 "isLive": instance.live,
                 "liveUrl": instance.full_url,
-                "editUrl": reverse("wagtailadmin_pages:edit", args=[instance.id]),
-                "createTranslationRequestUrl": reverse(
-                    "wagtail_localize:submit_page_translation", args=[instance.id]
-                ),
+                "editUrl": get_edit_url(instance),
+                "createTranslationRequestUrl": get_submit_translation_url(instance),
             }
-
         else:
             return {
                 "title": str(instance),
                 "isLive": True,
-                "editUrl": reverse(
-                    "wagtailsnippets:edit",
-                    args=[
-                        instance._meta.app_label,
-                        instance._meta.model_name,
-                        quote(instance.id),
-                    ],
-                ),
-                "createTranslationRequestUrl": reverse(
-                    "wagtail_localize:submit_snippet_translation",
-                    args=[
-                        instance._meta.app_label,
-                        instance._meta.model_name,
-                        quote(instance.id),
-                    ],
-                ),
+                "editUrl": get_edit_url(instance),
+                "createTranslationRequestUrl": get_submit_translation_url(instance),
             }
 
     def get_dest_object_info(segment):
@@ -731,21 +813,13 @@ def edit_translation(request, translation, instance):
                 "title": str(instance),
                 "isLive": instance.live,
                 "liveUrl": instance.full_url,
-                "editUrl": reverse("wagtailadmin_pages:edit", args=[instance.id]),
+                "editUrl": get_edit_url(instance),
             }
-
         else:
             return {
                 "title": str(instance),
                 "isLive": True,
-                "editUrl": reverse(
-                    "wagtailsnippets:edit",
-                    args=[
-                        instance._meta.app_label,
-                        instance._meta.model_name,
-                        quote(instance.id),
-                    ],
-                ),
+                "editUrl": get_edit_url(instance),
             }
 
     def get_translation_progress(segment, locale):
@@ -868,18 +942,7 @@ def edit_translation(request, translation, instance):
                                 "code": translated_instance.locale.language_code,
                                 "displayName": translated_instance.locale.get_display_name(),
                             },
-                            "editUrl": reverse(
-                                "wagtailadmin_pages:edit", args=[translated_instance.id]
-                            )
-                            if isinstance(translated_instance, Page)
-                            else reverse(
-                                "wagtailsnippets:edit",
-                                args=[
-                                    translated_instance._meta.app_label,
-                                    translated_instance._meta.model_name,
-                                    quote(translated_instance.id),
-                                ],
-                            ),
+                            "editUrl": get_edit_url(translated_instance),
                         }
                         for translated_instance in instance.get_translations().select_related(
                             "locale"
@@ -1041,12 +1104,20 @@ def restart_translation(request, translation, instance):
 
     if isinstance(instance, Page):
         return redirect("wagtailadmin_pages:edit", instance.id)
-    else:
+    elif instance._meta.model in get_snippet_models():
         return redirect(
             "wagtailsnippets:edit",
             instance._meta.app_label,
             instance._meta.model_name,
             quote(instance.pk),
+        )
+    elif "wagtail_localize.modeladmin" in settings.INSTALLED_APPS:
+        return redirect(
+            "{app_label}_{model_name}_modeladmin_edit".format(
+                app_label=instance._meta.app_label,
+                model_name=instance._meta.model_name,
+            ),
+            instance_pk=quote(instance.pk),
         )
 
 

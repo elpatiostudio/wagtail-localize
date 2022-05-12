@@ -47,6 +47,7 @@ from wagtail.core.models import (
     get_translatable_models,
 )
 from wagtail.core.utils import find_available_slug
+from wagtail.snippets.models import get_snippet_models
 
 from .compat import DATE_FORMAT
 from .fields import copy_synchronised_fields
@@ -60,6 +61,7 @@ from .segments import (
 from .segments.extract import extract_segments
 from .segments.ingest import ingest_segments
 from .strings import StringValue, validate_translation_links
+from .tasks import background
 
 
 if WAGTAIL_VERSION >= (2, 16):
@@ -116,7 +118,7 @@ def get_edit_url(instance):
     if isinstance(instance, Page):
         return reverse("wagtailadmin_pages:edit", args=[instance.id])
 
-    else:
+    elif instance._meta.model in get_snippet_models():
         return reverse(
             "wagtailsnippets:edit",
             args=[
@@ -124,6 +126,15 @@ def get_edit_url(instance):
                 instance._meta.model_name,
                 quote(instance.id),
             ],
+        )
+
+    elif "wagtail_localize.modeladmin" in settings.INSTALLED_APPS:
+        return reverse(
+            "{app_label}_{model_name}_modeladmin_edit".format(
+                app_label=instance._meta.app_label,
+                model_name=instance._meta.model_name,
+            ),
+            args=[quote(instance.pk)],
         )
 
 
@@ -2009,7 +2020,7 @@ class StringSegment(BaseSegment):
             context=context,
             order=value.order,
             string=string,
-            attrs=json.dumps(value.attrs),
+            attrs=json.dumps(value.attrs, cls=DjangoJSONEncoder),
         )
 
         return segment
@@ -2165,7 +2176,7 @@ class OverridableSegment(BaseSegment):
             source=source,
             context=context,
             order=value.order,
-            data_json=json.dumps(value.data),
+            data_json=json.dumps(value.data, cls=DjangoJSONEncoder),
         )
 
         return segment
@@ -2235,7 +2246,11 @@ class LocaleSynchronization(models.Model):
     def sync_trees(self, *, page_index=None):
         from .synctree import synchronize_tree
 
-        synchronize_tree(self.sync_from, self.locale, page_index=page_index)
+        background.enqueue(
+            synchronize_tree,
+            args=[self.sync_from, self.locale],
+            kwargs={"page_index": page_index},
+        )
 
 
 @receiver(post_save, sender=LocaleSynchronization)
